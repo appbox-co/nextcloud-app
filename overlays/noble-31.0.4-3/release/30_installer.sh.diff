@@ -1,0 +1,251 @@
+--- base/etc/my_init.d/30_installer.sh
++++ image/etc/my_init.d/30_installer.sh
+@@ -1,5 +1,96 @@
+ #!/bin/bash
+-set -x
++# No shell tracing: 31.0.4-2 ran under set -x, which printed the appbox
++# password (chpasswd) and the autoconfig passwords into the container log.
++# Progress lines start with "appbox-installer:" and never contain secrets.
++
++log() {
++    echo "appbox-installer: $*"
++}
++
++occ_appbox() {
++    su -s /bin/sh -c "cd /home/appbox/public_html && php occ $*" appbox
++}
++
++# Set while this installer has Nextcloud in maintenance mode for an upgrade or
++# repair it runs. It lives in the persistent logs volume, so a run that is cut
++# short (container stopped or restarted mid-upgrade) is finished at the next
++# start instead of leaving maintenance mode on. Maintenance mode that this
++# installer did not set (an administrator's, or an older failed upgrade's) is
++# left alone.
++INSTALLER_MAINT_MARK=/home/appbox/logs/.appbox-installer-maintenance
++
++# Sets NC_MAINTENANCE and NC_NEEDS_UPGRADE to 1 or 0 from occ status.
++read_status() {
++    local json
++    json=$(occ_appbox status --output=json 2>/dev/null | tail -n 1)
++    NC_MAINTENANCE=$(printf '%s' "$json" | php -r '$s = json_decode(stream_get_contents(STDIN), true); echo empty($s["maintenance"]) ? 0 : 1;' 2>/dev/null)
++    NC_NEEDS_UPGRADE=$(printf '%s' "$json" | php -r '$s = json_decode(stream_get_contents(STDIN), true); echo empty($s["needsDbUpgrade"]) ? 0 : 1;' 2>/dev/null)
++}
++
++# Waits until nginx and php-fpm answer index.php. A fresh install waits for a
++# 200 (the first request installs Nextcloud from autoconfig.php); an existing
++# installation may also answer 503 while it is in maintenance mode or needs an
++# upgrade, which the 31.0.4-2 loop (grep for '200') could wait on forever.
++wait_for_web() {
++    local code
++    while :; do
++        code=$(curl -s -o /dev/null -L -w '%{http_code}' http://"$HOSTNAME":80/index.php)
++        case "$1:$code" in
++            fresh:200|existing:200|existing:503) return 0 ;;
++        esac
++        printf '.'
++        sleep 1
++    done
++}
++
++# Prints the 'version' stored in a config.php (the version the database is at).
++stored_version() {
++    php -r 'error_reporting(0); $CONFIG = []; include $argv[1]; echo $CONFIG["version"] ?? "";' "$1" 2>/dev/null
++}
++
++# True when the database version stored in config.php is more than one major
++# version behind the installed code. occ upgrade refuses such a jump, and
++# repair against the old schema fails, so the installer leaves it alone.
++version_gap() {
++    local stored code
++    stored=$(stored_version /home/appbox/public_html/config/config.php)
++    code=$(php -r 'include "/home/appbox/public_html/version.php"; echo $OC_Version[0];' 2>/dev/null)
++    case "${stored%%.*}/$code" in *[!0-9/]*|/*|*/) return 1 ;; esac
++    [ "${stored%%.*}" -lt $((code - 1)) ]
++}
++
++# Runs the pending upgrade and the repair while this installer owns
++# maintenance mode, and turns maintenance mode off only when both succeed.
++finish_installer_maintenance() {
++    local rc
++    read_status
++    if [ "$NC_MAINTENANCE" = 1 ]; then
++        occ_appbox maintenance:mode --off
++    fi
++    if [ "$NC_NEEDS_UPGRADE" = 1 ]; then
++        log "running occ upgrade"
++        occ_appbox --no-interaction upgrade
++        rc=$?
++        if [ "$rc" -ne 0 ]; then
++            log "occ upgrade failed (exit $rc); it is tried again at the next start"
++            return 1
++        fi
++        log "occ upgrade finished"
++    fi
++    log "running occ maintenance:repair --include-expensive"
++    occ_appbox --no-interaction maintenance:repair --include-expensive
++    rc=$?
++    if [ "$rc" -ne 0 ]; then
++        log "occ maintenance:repair failed (exit $rc); it is tried again at the next start"
++        return 1
++    fi
++    read_status
++    if [ "$NC_MAINTENANCE" = 1 ]; then
++        occ_appbox maintenance:mode --off
++    fi
++    rm -f "$INSTALLER_MAINT_MARK"
++    log "upgrade and repair finished; maintenance mode is off"
++}
+ 
+ if [ ! -f /etc/ssh/ssh_host_rsa_key ] ; then
+     ssh-keygen -o -f /etc/ssh/ssh_host_rsa_key -N '' -t rsa -b 4096
+@@ -89,11 +180,13 @@
+ post_max_size=100G
+ max_execution_time=3600" > /etc/php/8.3/fpm/conf.d/40-nextcloud.ini
+ 
++if ! grep -q '^env\[HOSTNAME\]' /home/appbox/config/php-fpm/pool.d/www.conf; then
+ echo "env[HOSTNAME] = $HOSTNAME
+ env[PATH] = /usr/local/bin:/usr/bin:/bin
+ env[TMP] = /tmp
+ env[TMPDIR] = /tmp
+ env[TEMP] = /tmp" >> /home/appbox/config/php-fpm/pool.d/www.conf
++fi
+ 
+     mkdir -p /storage
+ 
+@@ -148,6 +241,21 @@
+         fi
+     fi
+ 
++    # Updates across more than one major version are unsupported: do not put
++    # new code over a database that is further behind than that.
++    if [ "$SKIP_UPGRADE" = false ] && [ -f /home/appbox/logs/config.php ]; then
++        STORED_VER=$(stored_version /home/appbox/logs/config.php)
++        case "${STORED_VER%%.*}" in
++            ''|*[!0-9]*) ;;
++            *)
++                if [ "${STORED_VER%%.*}" -lt $((${NEXTCLOUD_VER%%.*} - 1)) ]; then
++                    log "the database is at Nextcloud $STORED_VER, more than one major version behind $NEXTCLOUD_VER; not downloading $NEXTCLOUD_VER"
++                    SKIP_UPGRADE=true
++                fi
++                ;;
++        esac
++    fi
++
+     # download app (skip if installed version is already higher)
+     if [ "$SKIP_UPGRADE" = false ]; then
+         cd /home/appbox/public_html
+@@ -159,6 +267,11 @@
+         rm -fr nextcloud/
+     fi
+ 
++    if [[ $UPGRADE == "true" ]]; then
++        # An existing installation never reads autoconfig.php; do not leave the
++        # admin and database passwords in it.
++        rm -f /home/appbox/public_html/config/autoconfig.php
++    else
+ echo "<?php
+ \$AUTOCONFIG = array(
+   'dbtype'        => 'mysql',
+@@ -171,6 +284,7 @@
+   'adminpass'     => '${ADMIN_PASS}',
+   'directory'     => '/storage'
+ );" > /home/appbox/public_html/config/autoconfig.php
++    fi
+ 
+     if [ ! -f /storage/.ocdata ]; then
+         touch /storage/.ocdata
+@@ -209,16 +323,28 @@
+         fi
+ 
+         # Make sure config.php exists
+-        until curl -i -L http://"$HOSTNAME":80/index.php | grep -q '200'; do
+-            printf '.'
+-            sleep 1
+-        done
++        wait_for_web existing
+ 
+-        su -c "cd /home/appbox/public_html; php occ --no-interaction upgrade" -s /bin/sh appbox
+-        su -c "cd /home/appbox/public_html; php occ --no-interaction db:add-missing-indices" -s /bin/sh appbox
+-        su -c "cd /home/appbox/public_html; php occ --no-interaction db:convert-filecache-bigint" -s /bin/sh appbox
+-        su -c "cd /home/appbox/public_html; php occ --no-interaction db:add-missing-columns" -s /bin/sh appbox
+-        su -c "cd /home/appbox/public_html; php occ --no-interaction config:app:set files max_chunk_size --value 52428800" -s /bin/sh appbox
++        read_status
++        if version_gap; then
++            log "the database ($(stored_version /home/appbox/public_html/config/config.php)) is more than one major version behind the installed code; updates across several major versions are unsupported, so this installation is left unchanged"
++        elif [ "$NC_NEEDS_UPGRADE" = 1 ] || [ -f "$INSTALLER_MAINT_MARK" ]; then
++            if [ "$NC_MAINTENANCE" = 1 ] && [ ! -f "$INSTALLER_MAINT_MARK" ]; then
++                log "maintenance mode was already on and was not set by this installer; leaving it on and not upgrading"
++            else
++                touch "$INSTALLER_MAINT_MARK"
++                finish_installer_maintenance || true
++            fi
++        else
++            log "Nextcloud is up to date; no upgrade needed"
++        fi
++        read_status
++        if [ "$NC_MAINTENANCE" = 0 ] && [ "$NC_NEEDS_UPGRADE" = 0 ]; then
++            su -c "cd /home/appbox/public_html; php occ --no-interaction db:add-missing-indices" -s /bin/sh appbox
++            su -c "cd /home/appbox/public_html; php occ --no-interaction db:convert-filecache-bigint" -s /bin/sh appbox
++            su -c "cd /home/appbox/public_html; php occ --no-interaction db:add-missing-columns" -s /bin/sh appbox
++            su -c "cd /home/appbox/public_html; php occ --no-interaction config:app:set files max_chunk_size --value 52428800" -s /bin/sh appbox
++        fi
+         
+         pkill -9 mysql
+         pkill -9 nginx
+@@ -236,10 +362,7 @@
+             echo "waiting for mysql ..."
+         done
+ 
+-        until curl -i -L http://"$HOSTNAME":80/index.php | grep -q '200'; do
+-            printf '.'
+-            sleep 1
+-        done
++        wait_for_web fresh
+ 
+         su -c "cd /home/appbox/public_html; php occ --no-interaction db:add-missing-indices" -s /bin/sh appbox
+         su -c "cd /home/appbox/public_html; php occ --no-interaction db:convert-filecache-bigint" -s /bin/sh appbox
+@@ -250,6 +373,8 @@
+         su -c "cd /home/appbox/public_html; php occ --no-interaction files_external:create storage local null::null --config datadir=/APPBOX_DATA/storage/" -s /bin/sh appbox
+         su -c "cd /home/appbox/public_html; php occ --no-interaction files_external:option 2 enable_sharing true" -s /bin/sh appbox
+         su -c "cd /home/appbox/public_html; php occ --no-interaction config:app:set files max_chunk_size --value 52428800" -s /bin/sh appbox
++        touch "$INSTALLER_MAINT_MARK"
++        finish_installer_maintenance || true
+ 
+         pkill -9 mysql
+         pkill -9 nginx
+@@ -268,10 +393,7 @@
+     echo "waiting for mysql ..."
+ done
+ 
+-until curl -i -L http://"$HOSTNAME":80/index.php | grep -q '200'; do
+-    printf '.'
+-    sleep 1
+-done
++wait_for_web existing
+ 
+ # Check if the MIME type mapping for .mjs already exists
+ if ! grep -q "text/javascript js mjs;" "/home/appbox/config/nginx/nginx.conf"; then
+@@ -301,7 +423,14 @@
+     sed -i "/\$CONFIG/a \ \ 'maintenance_window_start' => $RANDOM_TIME," /home/appbox/public_html/config/config.php
+ fi
+ 
+-su -c "cd /home/appbox/public_html; php occ maintenance:repair --include-expensive" -s /bin/sh appbox
++if [ -f "$INSTALLER_MAINT_MARK" ]; then
++    if version_gap; then
++        log "an earlier installer run did not finish, but the database is more than one major version behind the code; leaving it unchanged"
++    else
++        log "an earlier installer run did not finish; finishing it"
++        finish_installer_maintenance || true
++    fi
++fi
+ 
+ pkill -9 mysql
+ pkill -9 nginx
+@@ -328,6 +457,7 @@
+ # set cronjob
+ crontab /app-sources/crontab
+ touch /etc/app_installer_completed
++log "start sequence finished"
+ 
+ 
+ #####
