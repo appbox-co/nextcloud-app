@@ -11,8 +11,9 @@
 # the compared paths apart from the added script, and identical CLI and FPM
 # module lists. It runs php-fpm8.1 -t and nginx -t, then the restart
 # regression: my_init's startup scripts in a container with a fresh tmpfs on
-# /run (as Appbox runs it), followed by php-fpm8.1, mysqld and sshd creating
-# their sockets and directories there. The same regression must fail on the
+# /run (as Appbox runs it), followed by php-fpm8.1 creating its socket, appbox
+# creating a socket in /run/mysqld (the image has no mysqld; /scripts/mysql.sh
+# installs it on first container start) and sshd -t. The same regression must fail on the
 # 27.1.5-1 base, which proves it detects the outage. Both modes require the
 # release tag to be absent from the registry; trial images are never pushed.
 set -euo pipefail

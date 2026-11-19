@@ -64,21 +64,31 @@ while [ ! -S /run/php/php8.1-fpm.sock ]; do
 done
 echo "php-fpm8.1 listening on /run/php/php8.1-fpm.sock"
 
-mkdir -p "$work/db"
-chown appbox:appbox "$work/db"
-mysqld --no-defaults --user=appbox --datadir="$work/db" --initialize-insecure --log-error="$work/init.log" \
-    || { cat "$work/init.log" >&2; fail "mysqld --initialize-insecure failed"; }
-mysqld --no-defaults --user=appbox --datadir="$work/db" --socket=/run/mysqld/mysqld.sock \
-    --pid-file="$work/db/mysqld.pid" --skip-networking --mysqlx=OFF --log-error="$work/mysqld.log" &
-mysqld_pid=$!
-i=0
-until mysqladmin --socket=/run/mysqld/mysqld.sock -uroot ping >/dev/null 2>&1; do
-    i=$((i + 1))
-    kill -0 "$mysqld_pid" 2>/dev/null || { tail -n 20 "$work/mysqld.log" >&2; fail "mysqld exited"; }
-    [ "$i" -le 120 ] || { tail -n 20 "$work/mysqld.log" >&2; fail "mysqld did not answer on /run/mysqld/mysqld.sock"; }
-    sleep 1
-done
-echo "mysqld answering on /run/mysqld/mysqld.sock as $(stat -c '%U' /run/mysqld/mysqld.sock)"
+if command -v mysqld >/dev/null 2>&1; then
+    mkdir -p "$work/db"
+    chown appbox:appbox "$work/db"
+    mysqld --no-defaults --user=appbox --datadir="$work/db" --initialize-insecure --log-error="$work/init.log" \
+        || { cat "$work/init.log" >&2; fail "mysqld --initialize-insecure failed"; }
+    mysqld --no-defaults --user=appbox --datadir="$work/db" --socket=/run/mysqld/mysqld.sock \
+        --pid-file="$work/db/mysqld.pid" --skip-networking --mysqlx=OFF --log-error="$work/mysqld.log" &
+    mysqld_pid=$!
+    i=0
+    until mysqladmin --socket=/run/mysqld/mysqld.sock -uroot ping >/dev/null 2>&1; do
+        i=$((i + 1))
+        kill -0 "$mysqld_pid" 2>/dev/null || { tail -n 20 "$work/mysqld.log" >&2; fail "mysqld exited"; }
+        [ "$i" -le 120 ] || { tail -n 20 "$work/mysqld.log" >&2; fail "mysqld did not answer on /run/mysqld/mysqld.sock"; }
+        sleep 1
+    done
+    echo "mysqld answering on /run/mysqld/mysqld.sock as $(stat -c '%U' /run/mysqld/mysqld.sock)"
+else
+    # The image has no mysqld: /scripts/mysql.sh installs mysql-server when a
+    # container is first created. mysqld runs as appbox and creates its socket
+    # in /run/mysqld, so check that appbox can do the same.
+    su -s /bin/sh appbox -c 'python3 -c "import socket; socket.socket(socket.AF_UNIX).bind(\"/run/mysqld/mysqld.sock\")"' \
+        || fail "appbox cannot create a socket in /run/mysqld"
+    [ -S /run/mysqld/mysqld.sock ] || fail "no socket in /run/mysqld after the bind"
+    echo "appbox created a unix socket in /run/mysqld (mysqld is installed on first container start)"
+fi
 
 ssh-keygen -A >/dev/null
 /usr/sbin/sshd -t -f /etc/ssh/sshd_config || fail "sshd -t failed"
