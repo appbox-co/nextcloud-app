@@ -8,6 +8,9 @@
 # sshd's privilege separation directory. Uses throwaway configuration and data
 # in /tmp, so it does not depend on the Nextcloud installer.
 set -eu
+# my_init passes the container environment, whose PATH may lack the sbin directories.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 
 fail() {
     echo "FAIL: $*" >&2
