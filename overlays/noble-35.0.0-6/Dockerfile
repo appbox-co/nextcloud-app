@@ -14,6 +14,10 @@ FROM repo.cylo.net/nextcloud@sha256:7f6f0473f114bba2f5b8d0d57db25002722e0fa45f03
 # up at exactly this version. release-gate.sh reads this line.
 ARG PHP84_MIN_VERSION=8.4.28-2+ubuntu24.04.1+deb.sury.org+1
 ARG PHP_SOURCE_PACKAGE=php8.4
+# MySQL 8.4 is inherited unchanged from 35.0.0-5 (installed at
+# 8.4.13-1ubuntu24.04 there); release-gate.sh checks the installed packages
+# against this minimum.
+ARG MYSQL84_MIN_VERSION=8.4.13-1ubuntu24.04
 LABEL net.cylo.php-min-version="${PHP84_MIN_VERSION}" \
       net.cylo.php-artifacts="repo.cylo.net/php-artifacts@sha256:2523b152432ee16ba6d9418aeaa0cafcc7e3ba97fccfb3aed46c5a73e2b2f8d0"
 
