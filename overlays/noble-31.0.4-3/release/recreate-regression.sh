@@ -198,6 +198,13 @@ config_stable() {
     grep -Ev "^[[:space:]]*'(version|maintenance)'[[:space:]]*=>" "$1"
 }
 
+# True when every line of the baseline config.php (apart from 'version' and
+# 'maintenance') is still in $1. occ upgrade may add keys ('theme',
+# 'loglevel'); a lost or replaced configuration loses baseline lines.
+config_kept() {
+    [ -z "$(grep -vxFf <(config_stable "$1") <(config_stable "$work/baseline/config.php"))" ]
+}
+
 # Lists the configuration keys with their values masked, so a difference can
 # be shown without printing secrets.
 config_keys() {
@@ -288,13 +295,13 @@ recreate)
         fi
         lost "public_html/config/config.php is missing or empty after the update"
     fi
-    if ! cmp -s <(config_stable "$work/baseline/config.php") <(config_stable "$config_php"); then
+    if ! config_kept "$config_php"; then
         echo "config.php keys before (<) and after (>) the update, values masked:"
         diff <(config_keys "$work/baseline/config.php") <(config_keys "$config_php") || true
         show_logs
         lost "public_html/config/config.php differs from the configuration before the update"
     fi
-    say "config.php restored and identical apart from 'version' and 'maintenance' ($(sha256sum < "$config_php" | cut -c1-16))"
+    say "config.php restored; every baseline setting kept apart from 'version' and 'maintenance' ($(sha256sum < "$config_php" | cut -c1-16))"
 
     if [ "$installer_status" -ne 0 ]; then
         show_logs
@@ -368,6 +375,9 @@ set-db-version)
 expect)
     shift 2
     status_json=$(occ status --output=json 2>/dev/null | tail -n 1)
+    # Saved once: grep -q or -m1 reading docker logs through a pipe stops early
+    # and, under pipefail, the SIGPIPE to docker logs fails the check.
+    logs_since_start > "$work/start.log"
     for check in "$@"; do
         key=${check%%=*}
         want=${check#*=}
@@ -400,19 +410,19 @@ expect)
                 [ "$got" = "$want" ] || fail "expected secrets in docker logs to be $want; $leaks log lines contain one"
                 ;;
             log_has)
-                logs_since_start | grep -Eq -- "$want" || { show_logs; fail "the log since the last start has no line matching: $want"; }
+                grep -Eq -- "$want" "$work/start.log" || { show_logs; fail "the log since the last start has no line matching: $want"; }
                 ;;
             log_lacks)
-                if logs_since_start | grep -Eq -- "$want"; then
-                    logs_since_start | grep -E -- "$want" | head -n 3 | sed 's/^/    /'
+                if grep -Eq -- "$want" "$work/start.log"; then
+                    grep -E -- "$want" "$work/start.log" | head -n 3 | sed 's/^/    /'
                     fail "the log since the last start has a line matching: $want"
                 fi
                 ;;
             log_order)
                 first=${want%%,*}
                 second=${want#*,}
-                n1=$(logs_since_start | grep -nE -m1 -- "$first" | cut -d: -f1)
-                n2=$(logs_since_start | grep -nE -m1 -- "$second" | cut -d: -f1)
+                n1=$(grep -nE -m1 -- "$first" "$work/start.log" | cut -d: -f1 || true)
+                n2=$(grep -nE -m1 -- "$second" "$work/start.log" | cut -d: -f1 || true)
                 [ -n "$n1" ] && [ -n "$n2" ] && [ "$n1" -lt "$n2" ] \
                     || { show_logs; fail "expected '$first' (line ${n1:-none}) before '$second' (line ${n2:-none})"; }
                 ;;
