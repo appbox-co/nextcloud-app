@@ -6,7 +6,7 @@
 # published the source but not the binaries. Nextcloud, nginx, MySQL, Redis,
 # the my_init scripts and the configuration stay as in 35.0.0-5;
 # release-gate.sh checks every package and file this overlay changes.
-FROM repo.cylo.net/php-artifacts@sha256:PENDING_SURY_ARTIFACT_DIGEST AS php-artifacts
+FROM repo.cylo.net/php-artifacts@sha256:2523b152432ee16ba6d9418aeaa0cafcc7e3ba97fccfb3aed46c5a73e2b2f8d0 AS php-artifacts
 
 FROM repo.cylo.net/nextcloud@sha256:7f6f0473f114bba2f5b8d0d57db25002722e0fa45f0389fb281e4b557bcde56a
 
@@ -15,7 +15,7 @@ FROM repo.cylo.net/nextcloud@sha256:7f6f0473f114bba2f5b8d0d57db25002722e0fa45f03
 ARG PHP84_MIN_VERSION=8.4.28-2+ubuntu24.04.1+deb.sury.org+1
 ARG PHP_SOURCE_PACKAGE=php8.4
 LABEL net.cylo.php-min-version="${PHP84_MIN_VERSION}" \
-      net.cylo.php-artifacts="repo.cylo.net/php-artifacts@sha256:PENDING_SURY_ARTIFACT_DIGEST"
+      net.cylo.php-artifacts="repo.cylo.net/php-artifacts@sha256:2523b152432ee16ba6d9418aeaa0cafcc7e3ba97fccfb3aed46c5a73e2b2f8d0"
 
 # Install exactly the php8.4 packages the image already has, at the artifact
 # version, keeping the deployed configuration: dpkg keeps locally modified

@@ -1,1 +1,17 @@
-# CVE ids that must appear in the php8.4-common changelog (filled after reading the built 8.4.28 changelog).
+# CVE ids that must appear in the Debian changelog of the installed
+# php8.4-common package (8.4.28-1 entry of the ondrej/php packaging; the
+# three PHP 8.5-only advisories are not in the 8.4 changelog).
+CVE-2026-115560
+CVE-2026-126714
+CVE-2026-127960
+CVE-2026-128064
+CVE-2026-128090
+CVE-2026-129289
+CVE-2026-129291
+CVE-2026-129292
+CVE-2026-129481
+CVE-2026-129496
+CVE-2026-129501
+CVE-2026-129506
+CVE-2026-129538
+CVE-2026-15353
