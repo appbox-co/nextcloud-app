@@ -27,16 +27,20 @@ read_status() {
     NC_NEEDS_UPGRADE=$(printf '%s' "$json" | php -r '$s = json_decode(stream_get_contents(STDIN), true); echo empty($s["needsDbUpgrade"]) ? 0 : 1;' 2>/dev/null)
 }
 
-# Waits until nginx and php-fpm answer index.php. A fresh install waits for a
-# 200 (the first request installs Nextcloud from autoconfig.php); an existing
-# installation may also answer 503 while it is in maintenance mode or needs an
-# upgrade, which the 31.0.4-2 loop (grep for '200') could wait on forever.
+# Waits until nginx and php-fpm answer index.php. Redirects are not followed:
+# an installed Nextcloud redirects to https://<host>/login, which curl cannot
+# verify inside the container. A fresh install waits for 200 or a redirect
+# (the first request installs Nextcloud from autoconfig.php); an existing
+# installation may also answer 401, 403 or 503 (maintenance mode, or an
+# upgrade pending). The 31.0.4-2 loop (grep for '200' in the headers) only
+# returned because the HSTS max-age value contains "200", and could wait
+# forever on a 503.
 wait_for_web() {
     local code
     while :; do
-        code=$(curl -s -o /dev/null -L -w '%{http_code}' http://"$HOSTNAME":80/index.php)
+        code=$(curl -s -o /dev/null -w '%{http_code}' http://"$HOSTNAME":80/index.php)
         case "$1:$code" in
-            fresh:200|existing:200|existing:503) return 0 ;;
+            fresh:200|fresh:30[1237]|existing:200|existing:30[123478]|existing:401|existing:403|existing:503) return 0 ;;
         esac
         printf '.'
         sleep 1

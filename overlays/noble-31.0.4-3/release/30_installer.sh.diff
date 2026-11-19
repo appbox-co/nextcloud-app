@@ -1,6 +1,6 @@
 --- base/etc/my_init.d/30_installer.sh
 +++ image/etc/my_init.d/30_installer.sh
-@@ -1,5 +1,96 @@
+@@ -1,5 +1,100 @@
  #!/bin/bash
 -set -x
 +# No shell tracing: 31.0.4-2 ran under set -x, which printed the appbox
@@ -31,16 +31,20 @@
 +    NC_NEEDS_UPGRADE=$(printf '%s' "$json" | php -r '$s = json_decode(stream_get_contents(STDIN), true); echo empty($s["needsDbUpgrade"]) ? 0 : 1;' 2>/dev/null)
 +}
 +
-+# Waits until nginx and php-fpm answer index.php. A fresh install waits for a
-+# 200 (the first request installs Nextcloud from autoconfig.php); an existing
-+# installation may also answer 503 while it is in maintenance mode or needs an
-+# upgrade, which the 31.0.4-2 loop (grep for '200') could wait on forever.
++# Waits until nginx and php-fpm answer index.php. Redirects are not followed:
++# an installed Nextcloud redirects to https://<host>/login, which curl cannot
++# verify inside the container. A fresh install waits for 200 or a redirect
++# (the first request installs Nextcloud from autoconfig.php); an existing
++# installation may also answer 401, 403 or 503 (maintenance mode, or an
++# upgrade pending). The 31.0.4-2 loop (grep for '200' in the headers) only
++# returned because the HSTS max-age value contains "200", and could wait
++# forever on a 503.
 +wait_for_web() {
 +    local code
 +    while :; do
-+        code=$(curl -s -o /dev/null -L -w '%{http_code}' http://"$HOSTNAME":80/index.php)
++        code=$(curl -s -o /dev/null -w '%{http_code}' http://"$HOSTNAME":80/index.php)
 +        case "$1:$code" in
-+            fresh:200|existing:200|existing:503) return 0 ;;
++            fresh:200|fresh:30[1237]|existing:200|existing:30[123478]|existing:401|existing:403|existing:503) return 0 ;;
 +        esac
 +        printf '.'
 +        sleep 1
@@ -98,7 +102,7 @@
  
  if [ ! -f /etc/ssh/ssh_host_rsa_key ] ; then
      ssh-keygen -o -f /etc/ssh/ssh_host_rsa_key -N '' -t rsa -b 4096
-@@ -89,11 +180,13 @@
+@@ -89,11 +184,13 @@
  post_max_size=100G
  max_execution_time=3600" > /etc/php/8.3/fpm/conf.d/40-nextcloud.ini
  
@@ -112,7 +116,7 @@
  
      mkdir -p /storage
  
-@@ -148,6 +241,21 @@
+@@ -148,6 +245,21 @@
          fi
      fi
  
@@ -134,7 +138,7 @@
      # download app (skip if installed version is already higher)
      if [ "$SKIP_UPGRADE" = false ]; then
          cd /home/appbox/public_html
-@@ -159,6 +267,11 @@
+@@ -159,6 +271,11 @@
          rm -fr nextcloud/
      fi
  
@@ -146,7 +150,7 @@
  echo "<?php
  \$AUTOCONFIG = array(
    'dbtype'        => 'mysql',
-@@ -171,6 +284,7 @@
+@@ -171,6 +288,7 @@
    'adminpass'     => '${ADMIN_PASS}',
    'directory'     => '/storage'
  );" > /home/appbox/public_html/config/autoconfig.php
@@ -154,7 +158,7 @@
  
      if [ ! -f /storage/.ocdata ]; then
          touch /storage/.ocdata
-@@ -209,16 +323,28 @@
+@@ -209,16 +327,28 @@
          fi
  
          # Make sure config.php exists
@@ -192,7 +196,7 @@
          
          pkill -9 mysql
          pkill -9 nginx
-@@ -236,10 +362,7 @@
+@@ -236,10 +366,7 @@
              echo "waiting for mysql ..."
          done
  
@@ -204,7 +208,7 @@
  
          su -c "cd /home/appbox/public_html; php occ --no-interaction db:add-missing-indices" -s /bin/sh appbox
          su -c "cd /home/appbox/public_html; php occ --no-interaction db:convert-filecache-bigint" -s /bin/sh appbox
-@@ -250,6 +373,8 @@
+@@ -250,6 +377,8 @@
          su -c "cd /home/appbox/public_html; php occ --no-interaction files_external:create storage local null::null --config datadir=/APPBOX_DATA/storage/" -s /bin/sh appbox
          su -c "cd /home/appbox/public_html; php occ --no-interaction files_external:option 2 enable_sharing true" -s /bin/sh appbox
          su -c "cd /home/appbox/public_html; php occ --no-interaction config:app:set files max_chunk_size --value 52428800" -s /bin/sh appbox
@@ -213,7 +217,7 @@
  
          pkill -9 mysql
          pkill -9 nginx
-@@ -268,10 +393,7 @@
+@@ -268,10 +397,7 @@
      echo "waiting for mysql ..."
  done
  
@@ -225,7 +229,7 @@
  
  # Check if the MIME type mapping for .mjs already exists
  if ! grep -q "text/javascript js mjs;" "/home/appbox/config/nginx/nginx.conf"; then
-@@ -301,7 +423,14 @@
+@@ -301,7 +427,14 @@
      sed -i "/\$CONFIG/a \ \ 'maintenance_window_start' => $RANDOM_TIME," /home/appbox/public_html/config/config.php
  fi
  
@@ -241,7 +245,7 @@
  
  pkill -9 mysql
  pkill -9 nginx
-@@ -328,6 +457,7 @@
+@@ -328,6 +461,7 @@
  # set cronjob
  crontab /app-sources/crontab
  touch /etc/app_installer_completed
