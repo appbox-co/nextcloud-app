@@ -18,8 +18,12 @@
 # /etc/my_init.d/30_installer.sh (base must have the 31.0.4-3 installer, image
 # must have this overlay's, and the difference must be exactly
 # release/30_installer.sh.diff), identical CLI and FPM module lists,
-# php-fpm8.3 -t, nginx -t, a multipart upload with the CLI server, and a PHP
-# page plus multipart upload served through nginx and php-fpm8.3.
+# php-fpm8.3 -t, nginx -t, a multipart upload with the CLI server, a PHP
+# page plus multipart upload served through nginx and php-fpm8.3, and
+# release/perm-pass-check.sh: the new storage permission pass leaves an
+# already-correct tree of 20000 files unchanged in at most a fifth of the old
+# per-file passes' time, and leaves exactly the same modes and owners as the
+# old passes on a tree with wrong ones.
 #
 # It then runs release/recreate-regression.sh on Appbox-style host
 # directories, three scenarios in parallel:
@@ -28,7 +32,8 @@
 #     interrupted installer run is finished and turned off at the next start;
 #     installed newer than the image; maintenance mode set by an administrator
 #     survives a recreate and a restart; a restart finishes while index.php
-#     answers 500 (31.0.4-3 waited forever there);
+#     answers 500 (31.0.4-3 waited forever there); a file with the wrong mode
+#     and owner in /storage is fixed by the faster permission pass on recreate;
 #   - upgrade: the database one patch behind the code is upgraded on recreate,
 #     occ upgrade running before the repair, and maintenance mode ends off;
 #     a database more than one major version behind is left unchanged (no
@@ -211,6 +216,10 @@ echo "== PHP page and multipart upload through nginx and $php_fpm"
 in_image "$image_ref" /release/fpm-smoke.sh "$php_fpm" \
     || fail "nginx and $php_fpm smoke test failed"
 
+echo "== Storage permission pass: only wrong entries, batched, same result"
+in_image "$image_ref" -c "bash /release/perm-pass-check.sh 20000" \
+    || fail "storage permission pass check failed"
+
 echo "== Update regression: installer lifecycle on Appbox host directories"
 t=$recreate_test
 life_dir=$(mktemp -d /dev/shm/nextcloud-recreate.XXXXXX)
@@ -236,6 +245,9 @@ scenario_lifecycle() {
         && "$t" "$d" restart \
         && "$t" "$d" expect maintenance=false mark=absent 'log_has=^appbox-installer: start sequence finished' "$no_upgrade" "$no_repair" \
         && "$t" "$d" index500 off \
+        && "$t" "$d" perm-break \
+        && "$t" "$d" recreate "$image_ref" \
+        && "$t" "$d" expect perm_fixed 'log_has=^appbox-installer: storage permissions: chmod 0770 on [1-9][0-9]* entries' \
         && "$t" "$d" maint installer \
         && "$t" "$d" restart \
         && "$t" "$d" expect maintenance=false mark=absent \
@@ -299,7 +311,7 @@ done
     || fail "update regression: upgrade scenario failed (exit $upgrade_status)"
 [ "$previous_status" -eq 0 ] \
     || fail "update regression: update from 31.0.4-2 failed (exit $previous_status)"
-echo "update regression passed: fresh install, recreate and restart without repair, restart with index.php answering 500, interrupted installer maintenance finished, administrator maintenance kept, upgrade before repair, multi-major database left unchanged, 31.0.4-2 password leak detected and absent after the update"
+echo "update regression passed: fresh install, recreate and restart without repair, restart with index.php answering 500, wrong storage permissions fixed on recreate, interrupted installer maintenance finished, administrator maintenance kept, upgrade before repair, multi-major database left unchanged, 31.0.4-2 password leak detected and absent after the update"
 
 echo "== Registry tag must not exist"
 "$gate_dir/release/registry-absent.sh" "$release_ref" \

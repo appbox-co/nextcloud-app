@@ -1,4 +1,4 @@
-# Nextcloud 31.0.4-4: the released 31.0.4-3 image with one correction in
+# Nextcloud 31.0.4-4: the released 31.0.4-3 image with two corrections in
 # /etc/my_init.d/30_installer.sh. Every other file, package and setting stays
 # exactly as in 31.0.4-3; release-gate.sh checks that.
 #
@@ -7,7 +7,13 @@
 # database answer 500, so their containers waited forever and never finished
 # starting (the update stayed "updating"). 31.0.4-4 accepts any answer from
 # PHP for an existing installation; only no answer, 502 and 504 mean nginx or
-# php-fpm is not ready. release/30_installer.sh.diff is the change.
+# php-fpm is not ready.
+#
+# The storage permission pass (mode 0770, owner appbox:appbox for everything
+# under /storage) started chmod and chown once per file, which kept large
+# installations offline for hours on every update. 31.0.4-4 changes only the
+# entries that are not already right, in batches, with the same targets; it
+# still runs before nginx starts. release/30_installer.sh.diff is the change.
 FROM repo.cylo.net/nextcloud@sha256:2532811b97ef36cb7b92df6678c929f0a35819807ff56593b1e879f213f9c9de
 
 # Release pin carried over from 31.0.4-3 and 31.0.4-2 (Ubuntu noble php8.3 with the fixes

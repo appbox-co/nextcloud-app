@@ -33,6 +33,8 @@
 #   index500 on|off   makes index.php answer HTTP 500 (on) like an
 #                     installation whose code is several major versions
 #                     ahead of its database, or restores it (off)
+#   perm-break        gives /storage/gate-wrong-perm (a new file) mode 0600 and
+#                     owner root:root, for "expect perm_fixed" after a recreate
 #   set-db-version <version>
 #                     sets config.php 'version' (the version the database is
 #                     at) below the code, so Nextcloud needs an upgrade
@@ -69,7 +71,7 @@ phase=$2
 image=${3:-}
 case "$phase" in
     install|recreate|cleanup|maint|set-db-version|index500) [ -n "$image" ] || usage ;;
-    bump|broken-state|restart) ;;
+    bump|broken-state|restart|perm-break) ;;
     expect) [ "$#" -ge 3 ] || usage ;;
     *) usage ;;
 esac
@@ -368,6 +370,11 @@ maint)
     say "maintenance mode on ($image)"
     ;;
 
+perm-break)
+    docker exec "$name" sh -c 'echo gate > /storage/gate-wrong-perm && chown root:root /storage/gate-wrong-perm && chmod 0600 /storage/gate-wrong-perm'
+    say "/storage/gate-wrong-perm is $(docker exec "$name" stat -c '%a %U %G' /storage/gate-wrong-perm)"
+    ;;
+
 index500)
     index_php=$vol/public_html/index.php
     case "$image" in
@@ -411,6 +418,10 @@ expect)
             db_version)
                 got=$(docker exec "$name" php -r 'include "/home/appbox/public_html/config/config.php"; echo $CONFIG["version"];' 2>/dev/null)
                 [ "$got" = "$want" ] || { show_logs; fail "expected config.php version $want, got $got"; }
+                ;;
+            perm_fixed)
+                got=$(docker exec "$name" stat -c '%a %U %G' /storage/gate-wrong-perm)
+                [ "$got" = "770 appbox appbox" ] || fail "/storage/gate-wrong-perm is $got after the recreate, expected 770 appbox appbox"
                 ;;
             mark)
                 if [ -e "$installer_mark" ]; then got=present; else got=absent; fi
