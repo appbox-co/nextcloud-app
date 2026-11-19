@@ -1,0 +1,1 @@
+# CVE ids that must appear in the php8.4-common changelog (filled after reading the built 8.4.28 changelog).
