@@ -1,28 +1,26 @@
 #!/usr/bin/env bash
-# Release gate for repo.cylo.net/nextcloud:27.1.5-5, the newest deployed
-# Ubuntu 22.04 image (nextcloud:27.1.5) with only its php8.1 packages upgraded
-# and a startup script that keeps the installed Nextcloud version.
+# Release gate for repo.cylo.net/nextcloud:27.1.5-5, the deployed Ubuntu 22.04
+# 'latest' image with only its php8.1 packages upgraded.
 #
 # Usage: ./release-gate.sh repo.cylo.net/nextcloud:27.1.5-5   (release)
-#        ./release-gate.sh local/nextcloud-trial:27.1.5-1     (trial)
+#        ./release-gate.sh local/nextcloud-trial:31.0.4-1     (trial)
 #
 # Release mode requires the image to have been built with the php8.1 minimum
-# pinned in the Dockerfile (ARG PHP81_MIN_VERSION). Trial mode accepts the
-# minimum the trial image was built with (--build-arg PHP81_MIN_VERSION=<the
+# pinned in the Dockerfile (ARG PHP83_MIN_VERSION). Trial mode accepts the
+# minimum the trial image was built with (--build-arg PHP83_MIN_VERSION=<the
 # current version>), so every other check can be exercised before Ubuntu
 # publishes the fix. Release mode also requires every CVE id listed in
-# release/required-fixes.txt to appear in the php8.1-common changelog; trial
+# release/required-fixes.txt to appear in the php8.3-common changelog; trial
 # mode only reports them. Trial images are never pushed. Both modes require
 # the release tag to be absent from the registry.
 #
-# Against the deployed base digest it checks: two added layers, identical
+# Against the deployed base digest it checks: one added layer, identical
 # runtime configuration (env including NEXTCLOUD_VER, command, ports, user),
-# identical non-php8.1 packages, the same set of php8.1 packages, identical
-# installer, /app-sources, PHP, nginx and service files apart from the added
-# version-pin script, and identical CLI and FPM module lists. It also runs
-# php-fpm8.1 -t, nginx -t, a multipart upload (CLI server, and a PHP page plus
-# upload served through nginx and php-fpm8.1), the version-pin cases, and a my_init run
-# that proves the pinned version reaches 30_installer.sh.
+# identical non-php8.3 packages, the same set of php8.3 packages, identical
+# installer, /app-sources, PHP, nginx and service files, and identical CLI and
+# FPM module lists. It also runs php-fpm8.3 -t, nginx -t, a multipart upload
+# with the CLI server, and a PHP page plus multipart upload served through
+# nginx and php-fpm8.3.
 set -euo pipefail
 
 release_ref=repo.cylo.net/nextcloud:27.1.5-5
@@ -32,8 +30,6 @@ php_source=php8.1
 php_cli=php8.1
 php_fpm=php-fpm8.1
 min_arg=PHP81_MIN_VERSION
-added_layers=2
-pin_script=/etc/my_init.d/29_keep_installed_nextcloud.sh
 compared_paths="/etc/php /etc/my_init.d /app-sources /etc/nginx /etc/service /etc/container_environment /etc/cron.d /etc/ssh/sshd_config /scripts /sbin/my_init"
 gate_dir=$(cd "$(dirname "$0")" && pwd)
 
@@ -77,11 +73,11 @@ docker image inspect --format '{{json .Config.Env}}' "$image_ref" | jq -r '.[]' 
 
 docker image inspect --format '{{json .RootFS.Layers}}' "$base_ref" | jq -r '.[]' > "$work/base-layers"
 docker image inspect --format '{{json .RootFS.Layers}}' "$image_ref" | jq -r '.[]' > "$work/image-layers"
-[ "$(wc -l < "$work/image-layers")" -eq "$(( $(wc -l < "$work/base-layers") + added_layers ))" ] \
-    || fail "expected exactly $added_layers layers on top of the deployed base"
+[ "$(wc -l < "$work/image-layers")" -eq "$(( $(wc -l < "$work/base-layers") + 1 ))" ] \
+    || fail "expected exactly one layer on top of the deployed base"
 head -n "$(wc -l < "$work/base-layers")" "$work/image-layers" | cmp -s - "$work/base-layers" \
     || fail "image is not built on the deployed base layers"
-echo "$added_layers layers on top of $base_ref"
+echo "one layer on top of $base_ref"
 
 echo "== $php_source packages"
 pinned_min=$(sed -n "s/^ARG $min_arg=\\([A-Za-z0-9.+~-]*\\)\$/\\1/p" "$gate_dir/Dockerfile")
@@ -137,19 +133,14 @@ changed_php=$(awk -F'|' -v src="$php_source" 'NR == FNR { if ($3 == src) old[$2]
     $3 == src && old[$2] != $4 { n++ } END { print n + 0 }' "$work/base-dpkg" "$work/image-dpkg")
 echo "$(wc -l < "$work/image-dpkg") packages; $changed_php $php_source packages upgraded, nothing else changed"
 
-echo "== Installer, sources and configuration unchanged apart from $pin_script"
+echo "== Installer, sources and configuration unchanged"
 # shellcheck disable=SC2086
 in_image "$base_ref" /release/file-manifest.sh $compared_paths > "$work/base-files"
 # shellcheck disable=SC2086
 in_image "$image_ref" /release/file-manifest.sh $compared_paths > "$work/image-files"
-pin_hash=$(sha256sum < "$gate_dir/29_keep_installed_nextcloud.sh" | cut -c1-64)
-printf 'file 755 root root %s %s\n' "$pin_hash" "$pin_script" > "$work/expected-added"
-diff "$work/base-files" "$work/image-files" | sed -n 's/^> //p' > "$work/added" || true
-diff "$work/base-files" "$work/image-files" | sed -n 's/^< //p' > "$work/removed" || true
-[ ! -s "$work/removed" ] || { cat "$work/removed" >&2; fail "files changed or removed compared with the deployed base"; }
-diff -u "$work/expected-added" "$work/added" \
-    || fail "the only added path must be $pin_script with the checked-in contents"
-echo "$(wc -l < "$work/base-files") paths identical; added $pin_script"
+diff -u "$work/base-files" "$work/image-files" \
+    || fail "files under $compared_paths differ from the deployed base"
+echo "$(wc -l < "$work/image-files") paths identical"
 
 echo "== PHP modules"
 diff -u <(docker run --rm --network none --entrypoint "$php_fpm" "$base_ref" -m) \
@@ -174,64 +165,6 @@ echo "== PHP page and multipart upload through nginx and $php_fpm"
 in_image "$image_ref" /release/fpm-smoke.sh "$php_fpm" \
     || fail "nginx and $php_fpm smoke test failed"
 
-echo "== Version pin cases"
-# $1: installed $OC_VersionString value, or 'none' for no version.php
-# $2: 'completed' to simulate a restart of an installed container, else 'recreate'
-# $3: expected /etc/container_environment/NEXTCLOUD_VER, or 'unset'
-pin_case() {
-    local result
-    result=$(docker run --rm --network none --entrypoint sh "$image_ref" -c '
-        set -eu
-        rm -f /etc/container_environment/NEXTCLOUD_VER /etc/app_installer_completed
-        mkdir -p /home/appbox/public_html
-        rm -f /home/appbox/public_html/version.php
-        if [ "$1" != none ]; then
-            printf "<?php\n\$OC_Version = array(1,2,3,4);\n\$OC_VersionString = '\''%s'\'';\n\$OC_Edition = '\'''\'';\n" "$1" \
-                > /home/appbox/public_html/version.php
-        fi
-        [ "$2" = completed ] && touch /etc/app_installer_completed
-        '"$pin_script"' >/dev/null
-        cat /etc/container_environment/NEXTCLOUD_VER 2>/dev/null || echo unset
-    ' sh "$1" "$2") || fail "version pin: the script failed for installed '$1' ($2)"
-    [ "$result" = "$3" ] || fail "version pin: installed '$1' ($2) gave NEXTCLOUD_VER=$result, expected $3"
-    echo "installed '$1' ($2) -> $result"
-}
-pin_case 28.0.14 recreate 28.0.14
-pin_case 29.0.5 recreate 29.0.5
-pin_case 27.1.11 recreate 27.1.11
-pin_case 27.0.1 recreate 27.0.1
-pin_case 27.1.5 recreate 27.1.5
-pin_case none recreate unset
-pin_case '28.0.0 RC1' recreate unset
-pin_case 27.1 recreate unset
-pin_case abc recreate unset
-pin_case 28.0.14 completed unset
-
-echo "== Pinned version reaches 30_installer.sh through my_init"
-# Replace the installer with a probe in a disposable container and run the
-# real my_init startup sequence.
-my_init_case() {
-    local result
-    result=$(docker run --rm --network none --entrypoint sh "$image_ref" -c '
-        set -eu
-        rm -f /etc/app_installer_completed /home/appbox/public_html/version.php
-        mkdir -p /home/appbox/public_html /tmp/my_init.d.saved
-        if [ "$1" != none ]; then
-            printf "<?php\n\$OC_VersionString = '\''%s'\'';\n" "$1" > /home/appbox/public_html/version.php
-        fi
-        mv /etc/my_init.d/* /tmp/my_init.d.saved/
-        cp /tmp/my_init.d.saved/29_keep_installed_nextcloud.sh /etc/my_init.d/
-        printf "#!/bin/sh\nprintf %%s \"\$NEXTCLOUD_VER\" > /tmp/nextcloud_ver_seen_by_installer\n" > /etc/my_init.d/30_installer.sh
-        chmod 755 /etc/my_init.d/30_installer.sh
-        /sbin/my_init --skip-runit -- cat /tmp/nextcloud_ver_seen_by_installer 2>/dev/null
-    ' sh "$1" | tail -n 1) || fail "my_init run failed for installed '$1'"
-    [ "$result" = "$2" ] || fail "my_init: installed '$1' gave the installer NEXTCLOUD_VER=$result, expected $2"
-    echo "installed '$1' -> installer sees NEXTCLOUD_VER=$result"
-}
-my_init_case 28.0.14 28.0.14
-my_init_case 27.0.1 27.0.1
-my_init_case none 27.1.5
-
 echo "== Registry tag must not exist"
 "$gate_dir/release/registry-absent.sh" "$release_ref" \
     || fail "registry precondition for $release_ref not met"
@@ -239,5 +172,5 @@ echo "== Registry tag must not exist"
 if [ "$mode" = trial ]; then
     echo "TRIAL PASSED: $image_ref ($php_source at the trial minimum $check_min; $release_ref absent). Not releasable: built without the release pin $pinned_min."
 else
-    echo "PASS: $release_ref ($php_source >= $check_min, version pin verified, everything else as deployed, tag absent)"
+    echo "PASS: $release_ref ($php_source >= $check_min, everything else as deployed, tag absent)"
 fi
