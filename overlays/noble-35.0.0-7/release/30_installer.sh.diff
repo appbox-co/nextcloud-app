@@ -241,3 +241,11 @@
  
  # Check if the MIME type mapping for .mjs already exists
  if ! grep -q "text/javascript js mjs;" "/home/appbox/config/nginx/nginx.conf"; then
+@@ -388,6 +539,7 @@
+ echo "Finishing Install"
+ # Finish Install
+ if [ "${APP_APEX_CALLBACK}" = true ]; then
++    log "sending the installed callback"
+     until [[ $(curl -i -H "Accept: application/json" -H "Content-Type:application/json" -X POST "https://api.cylo.io/v1/apps/installed/${INSTANCE_ID}" | grep '200') ]]
+         do
+         sleep 5

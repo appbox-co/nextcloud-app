@@ -106,9 +106,22 @@ occ() {
     docker exec "$name" su -s /bin/sh -c "cd /home/appbox/public_html && php occ $*" appbox
 }
 
+# The whole container log. Read it into a variable before grep -q: with
+# pipefail, grep -q closing a pipe from docker logs early fails the pipeline.
+container_log() {
+    docker logs "$name" 2>&1
+}
+
+# Exits 0 when the container log contains the fixed string $1.
+log_has() {
+    local log
+    log=$(container_log)
+    grep -qF -- "$1" <<< "$log"
+}
+
 # The password must never reach the container log.
 check_log_has_no_password() {
-    if docker logs "$name" 2>&1 | grep -qF -- "$admin_pass"; then
+    if log_has "$admin_pass"; then
         fail "the admin password appears in the container log"
     fi
 }
@@ -132,16 +145,16 @@ wait_for_stop() {
 
 check_failed_closed() {
     local starts=$1 count
-    if docker logs "$name" 2>&1 | grep -q 'Finishing Install'; then
+    if log_has 'appbox-installer: sending the installed callback'; then
         show_logs
         fail "the installer reached the installed callback after a rejected setup"
     fi
     if docker cp "$name:/etc/app_installer_completed" - >/dev/null 2>&1; then
         fail "/etc/app_installer_completed exists after a rejected setup"
     fi
-    count=$(docker logs "$name" 2>&1 | grep -c 'appbox-installer: the first-time setup did not finish' || true)
+    count=$(container_log | grep -c 'appbox-installer: the first-time setup did not finish' || true)
     [ "$count" -eq "$starts" ] || { show_logs; fail "expected $starts rejected setup runs in the log, found $count"; }
-    docker logs "$name" 2>&1 | grep -q 'but Nextcloud is not installed (occ: not-installed)' \
+    log_has 'but Nextcloud is not installed (occ: not-installed)' \
         || { show_logs; fail "the log does not show Nextcloud reporting itself not installed"; }
     [ -f "$autoconfig" ] || fail "autoconfig.php was removed after a rejected setup; the next start could not run it again"
     [ "$(stat -c '%a' "$autoconfig")" = 640 ] || fail "autoconfig.php has mode $(stat -c '%a' "$autoconfig"), expected 640"
@@ -206,7 +219,7 @@ finish_setup_with() {
         show_logs
         fail "the setup did not finish after the container was recreated from $1"
     fi
-    docker logs "$name" 2>&1 | grep -q 'appbox-installer: an earlier first-time setup did not finish; running the setup again' \
+    log_has 'appbox-installer: an earlier first-time setup did not finish; running the setup again' \
         || { show_logs; fail "the recreated container did not run the unfinished first-time setup again"; }
     check_installed
 }
@@ -220,7 +233,7 @@ rejected)
     docker start "$name" >/dev/null
     wait_for_stop
     check_failed_closed 2
-    docker logs "$name" 2>&1 | grep -q 'appbox-installer: an earlier first-time setup did not finish; running the setup again' \
+    log_has 'appbox-installer: an earlier first-time setup did not finish; running the setup again' \
         || { show_logs; fail "the second start did not run the unfinished first-time setup again"; }
     say "second start: ran the setup again and stopped again, still no callback or marker"
     finish_setup_with "$image"

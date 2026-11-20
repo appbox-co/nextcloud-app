@@ -232,7 +232,11 @@ check_password() {
     [ "$status" = 200 ] || fail "admin login with the special-character password returned HTTP $status"
     docker exec "$test_name" perl -e 'my $h = (getpwnam("appbox"))[1]; exit(crypt($ENV{ADMIN_PASS}, $h) eq $h ? 0 : 1)' \
         || fail "the appbox account password is not the admin password"
-    if docker logs "$test_name" 2>&1 | grep -qF -- "$gate_pass"; then
+    # Read the log first: with pipefail, grep -q closing the pipe early would
+    # make a match look like no match.
+    local log
+    log=$(docker logs "$test_name" 2>&1)
+    if grep -qF -- "$gate_pass" <<< "$log"; then
         fail "the admin password appears in the container log"
     fi
 }

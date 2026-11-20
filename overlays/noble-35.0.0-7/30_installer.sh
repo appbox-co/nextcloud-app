@@ -539,6 +539,7 @@ echo "      *            *..*         :"
 echo "Finishing Install"
 # Finish Install
 if [ "${APP_APEX_CALLBACK}" = true ]; then
+    log "sending the installed callback"
     until [[ $(curl -i -H "Accept: application/json" -H "Content-Type:application/json" -X POST "https://api.cylo.io/v1/apps/installed/${INSTANCE_ID}" | grep '200') ]]
         do
         sleep 5
